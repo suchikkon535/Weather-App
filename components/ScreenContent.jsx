@@ -4,15 +4,12 @@ import {
   View,
   TextInput,
   TouchableOpacity,
-  Image,
   ScrollView,
   ActivityIndicator,
   Alert,
 } from "react-native";
 import * as Location from "expo-location";
 import { Ionicons, FontAwesome5 } from "@expo/vector-icons";
-
-const API_KEY = "bd5e378503939ddaee76f12ad7a97608"; // 🔑 OpenWeatherMap key
 
 export default function ScreenContent() {
   const [query, setQuery] = useState("");
@@ -23,53 +20,75 @@ export default function ScreenContent() {
   const [forecast, setForecast] = useState([]);
 
   useEffect(() => {
-    fetchWeather(city, isCelsius ? "metric" : "imperial");
+    fetchWeather(city);
   }, []);
 
-  async function fetchWeather(cityName, units = "metric") {
+  // Map Open-Meteo weather codes to emoji
+  function getWeatherIcon(code) {
+    switch (code) {
+      case 0:
+        return "☀️"; // Clear
+      case 1:
+      case 2:
+        return "⛅"; // Partly cloudy
+      case 3:
+        return "☁️"; // Overcast
+      case 61:
+      case 63:
+      case 65:
+        return "🌧️"; // Rain
+      case 71:
+      case 73:
+      case 75:
+        return "❄️"; // Snow
+      default:
+        return "🌤️"; // Other
+    }
+  }
+
+  async function fetchWeather(cityName) {
     try {
       setLoading(true);
 
-      const currentRes = await fetch(
-        `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
+      // 1️⃣ Geocoding: Get latitude & longitude
+      const geoRes = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
           cityName
-        )}&units=${units}&appid=${API_KEY}`
+        )}`
       );
-      const currentJson = await currentRes.json();
-      if (currentJson.cod !== 200) {
-        Alert.alert("No data", currentJson.message || "Could not find weather.");
+      const geoJson = await geoRes.json();
+
+      if (!geoJson.results || geoJson.results.length === 0) {
+        Alert.alert("No data", "City not found");
         setLoading(false);
         return;
       }
 
-      const forecastRes = await fetch(
-        `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(
-          cityName
-        )}&units=${units}&appid=${API_KEY}`
+      const { latitude, longitude, name } = geoJson.results[0];
+
+      // 2️⃣ Fetch weather
+      const weatherRes = await fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&daily=temperature_2m_max,temperature_2m_min,weathercode&current_weather=true&timezone=auto`
       );
-      const forecastJson = await forecastRes.json();
+      const weatherJson = await weatherRes.json();
 
-      setCity(currentJson.name);
+      setCity(name);
+
+      // Current weather
       setCurrent({
-        temp: Math.round(currentJson.main.temp),
-        feels_like: Math.round(currentJson.main.feels_like),
-        description: currentJson.weather[0].description,
-        icon: `https://openweathermap.org/img/wn/${currentJson.weather[0].icon}@2x.png`,
-        humidity: currentJson.main.humidity,
-        wind_kmh: Math.round(currentJson.wind.speed * 3.6),
-        sunrise: new Date(currentJson.sys.sunrise * 1000),
-        sunset: new Date(currentJson.sys.sunset * 1000),
+        temp: Math.round(weatherJson.current_weather.temperature),
+        wind_kmh: Math.round(weatherJson.current_weather.windspeed),
+        weathercode: weatherJson.current_weather.weathercode,
       });
 
-      const daily = {};
-      forecastJson.list.forEach((entry) => {
-        const date = entry.dt_txt.split(" ")[0];
-        if (!daily[date] || entry.dt_txt.includes("12:00:00")) {
-          daily[date] = entry;
-        }
-      });
-
-      setForecast(Object.values(daily).slice(1, 6));
+      // 5-day forecast
+      const forecastData = weatherJson.daily.temperature_2m_max.map((maxTemp, i) => ({
+        temp_max: maxTemp,
+        temp_min: weatherJson.daily.temperature_2m_min[i],
+        weathercode: weatherJson.daily.weathercode[i],
+        dt: weatherJson.daily.time[i],
+      }));
+      setForecast(forecastData.slice(0, 5));
     } catch (err) {
       console.error(err);
       Alert.alert("Error", "Failed to fetch weather data.");
@@ -80,7 +99,7 @@ export default function ScreenContent() {
 
   async function handleSearch() {
     if (!query.trim()) return;
-    fetchWeather(query.trim(), isCelsius ? "metric" : "imperial");
+    fetchWeather(query.trim());
     setQuery("");
   }
 
@@ -96,14 +115,13 @@ export default function ScreenContent() {
       const loc = await Location.getCurrentPositionAsync({});
       const { latitude, longitude } = loc.coords;
 
-      const currentRes = await fetch(
-        `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&units=${
-          isCelsius ? "metric" : "imperial"
-        }&appid=${API_KEY}`
+      // Reverse geocoding: get nearest city
+      const geoRes = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude}&longitude=${longitude}`
       );
-      const data = await currentRes.json();
-      if (data && data.name) {
-        fetchWeather(data.name, isCelsius ? "metric" : "imperial");
+      const geoJson = await geoRes.json();
+      if (geoJson.results && geoJson.results[0]?.name) {
+        fetchWeather(geoJson.results[0].name);
       }
     } catch (err) {
       console.error(err);
@@ -114,9 +132,15 @@ export default function ScreenContent() {
   }
 
   function toggleUnits() {
-    const newUnits = !isCelsius;
-    setIsCelsius(newUnits);
-    if (city) fetchWeather(city, newUnits ? "metric" : "imperial");
+    // Open-Meteo provides Celsius by default, convert manually if needed
+    setIsCelsius(!isCelsius);
+    if (current && city) {
+      fetchWeather(city);
+    }
+  }
+
+  function convertTemp(temp) {
+    return isCelsius ? temp : Math.round(temp * 1.8 + 32);
   }
 
   return (
@@ -154,54 +178,21 @@ export default function ScreenContent() {
         <Text className="text-2xl font-semibold text-slate-700">{city}</Text>
         {current ? (
           <>
-            <View className="flex-row items-center mt-4 space-x-3">
-              <Image source={{ uri: current.icon }} className="w-20 h-20" />
-              <View className="flex-row items-end">
-                <Text className="text-6xl font-bold">{current.temp}</Text>
-                <Text className="text-2xl text-slate-500">
-                  {isCelsius ? "°C" : "°F"}
-                </Text>
-              </View>
-            </View>
-            <Text className="text-base text-slate-500 mt-1 italic">
-              {current.description}
+            <Text className="text-6xl my-2">{getWeatherIcon(current.weathercode)}</Text>
+            <Text className="text-6xl font-bold">
+              {convertTemp(current.temp)}
+              <Text className="text-2xl text-slate-500">{isCelsius ? "°C" : "°F"}</Text>
             </Text>
-            <Text className="text-sm text-slate-400 mt-1">
-              Feels like {current.feels_like}°{isCelsius ? "C" : "F"}
-            </Text>
-
             <View className="flex-row justify-center space-x-8 mt-4 gap-6">
-              <View className="items-center">
-                <FontAwesome5 name="tint" size={16} color="#0ea5e9" />
-                <Text className="text-sm text-slate-600 mt-1">{current.humidity}%</Text>
-                <Text className="text-xs text-slate-400">Humidity</Text>
-              </View>
               <View className="items-center">
                 <FontAwesome5 name="wind" size={16} color="#0ea5e9" />
                 <Text className="text-sm text-slate-600 mt-1">{current.wind_kmh} km/h</Text>
                 <Text className="text-xs text-slate-400">Wind</Text>
               </View>
-              <View className="items-center">
-                <Ionicons name="sunny-outline" size={18} color="#facc15" />
-                <Text className="text-xs text-slate-600 mt-1">
-                  {current.sunrise.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </Text>
-                <Text className="text-xs text-slate-400">Sunrise</Text>
-              </View>
-              <View className="items-center">
-                <Ionicons name="moon-outline" size={18} color="#64748b" />
-                <Text className="text-xs text-slate-600 mt-1">
-                  {current.sunset.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </Text>
-                <Text className="text-xs text-slate-400">Sunset</Text>
-              </View>
             </View>
           </>
         ) : (
-          <View className="items-center mt-6">
-            <Ionicons name="cloud-outline" size={64} color="#94a3b8" />
-            <Text className="text-sm text-slate-400 mt-2">No data yet</Text>
-          </View>
+          <Text className="text-sm text-slate-400 mt-4">No data yet</Text>
         )}
       </View>
 
@@ -217,18 +208,18 @@ export default function ScreenContent() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} className="space-x-3">
             {forecast.length > 0 ? (
               forecast.map((d, idx) => {
-                const date = new Date(d.dt_txt);
+                const date = new Date(d.dt);
                 const dayName = date.toLocaleDateString(undefined, { weekday: "short" });
                 return (
-                  <View key={idx} className="w-24 bg-white rounded-xl p-2 m-1 items-center shadow-sm">
+                  <View
+                    key={idx}
+                    className="w-24 bg-white rounded-xl p-2 m-1 items-center shadow-sm"
+                  >
                     <Text className="text-sm font-medium text-slate-600">{dayName}</Text>
-                    <Image
-                      source={{ uri: `https://openweathermap.org/img/wn/${d.weather[0].icon}@2x.png` }}
-                      className="w-12 h-12 my-1"
-                    />
+                    <Text className="text-2xl my-1">{getWeatherIcon(d.weathercode)}</Text>
                     <Text className="text-sm font-semibold">
-                      {Math.round(d.main.temp_max)}° /
-                      <Text className="text-slate-500"> {Math.round(d.main.temp_min)}°</Text>
+                      {convertTemp(d.temp_max)}° /
+                      <Text className="text-slate-500"> {convertTemp(d.temp_min)}°</Text>
                     </Text>
                   </View>
                 );
